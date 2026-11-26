@@ -1,42 +1,27 @@
-#############################################################
-# Health convergence: Hungary vs. comparator country
-# Kitagawa decomposition + parametric bootstrap (Poisson)
-#############################################################
-
-# install.packages(c("eurostat", "dplyr", "tidyr"))
+### Health convergence
+# install.packages("eurostat")
 library(eurostat)
 library(dplyr)
 library(tidyr)
 
-#------------------------------------------------------------
-# 0) SETTINGS
-#------------------------------------------------------------
-investigated <- "HU"   # investigated country
-comparator   <- "DK"   # comparator country (change it freely, e.g. "AT")
-base_year    <- 2011
-ref_year     <- 2019
-
-B     <- 10000         # number of bootstrap replications
-alpha <- 0.05          # 95% confidence level
-set.seed(2026)         # reproducibility
-
-
-#------------------------------------------------------------
-# 1) DATA DOWNLOAD AND CLEANING (same as before)
-#------------------------------------------------------------
+# downloading the eurostat geo codes and names
 geo_dic <- get_eurostat_dic("geo")
+
+# select only 2 letters codes
 country_codes <- geo_dic$code_name[
   grepl("^[A-Z]{2}$", geo_dic$code_name)
 ]
 
+# download the eurostat: Causes of death: 
+# standardised death rate by NUTS 2 region (country) of residence
 health_data <- get_eurostat(
   id = "hlth_cd_asdr2",
   filters = list(
-    geo = country_codes,
-    time = c(base_year, ref_year),
-    sex = "T",
-    age = "TOTAL",
-    unit = "RT"          # age-standardised death rate
+    geo = country_codes, # only the 2-letters coded
+    time = c(2011, 2019), # 2011 and 2019
+    sex = "T", # total
+    age = "TOTAL", # total
+    unit = "RT" # age-standardised death rate
   ),
   time_format = "num"
 )
@@ -49,16 +34,18 @@ health_data <- health_data %>%
 # check the available ICD-10 codes
 sort(unique(health_data$icd10))
 
-# the 13 Level 1 causes of death
+# the 13 Level 1 causes of death (total separately)
 level1_causes <- c(
   "A_B", "C00-D48", "D50-D89", "E", "F",
   "G_H", "I", "J", "K", "L", "M", "N", "V01-Y89")
 
+# filter the 13 Level 1 causes
 health_data_level1 <- health_data %>%
   filter(icd10 %in% level1_causes) %>%
-  select(geo, time, icd10, values)
+  select(geo, time, icd10, values) # select only these columns
 
 # all-cause rate: Eurostat changed the code (TOTAL in 2011, A-R_V-Y in 2019)
+# get these total rates and merge into: 'ALL_CAUSES'
 all_causes <- health_data %>%
   filter(icd10 %in% c("TOTAL", "A-R_V-Y")) %>%
   filter(!is.na(values)) %>%
@@ -68,30 +55,28 @@ all_causes <- health_data %>%
   mutate(icd10 = "ALL_CAUSES") %>%
   select(geo, time, icd10, values)
 
+# bind 13 Level 1 causes + total
 health_final <- rbind(health_data_level1, all_causes)
 
-#------------------------------------------------------------
-# 2) WIDE TABLE: one row per cause, 4 rates
-#    inv_2011, inv_2019, comp_2011, comp_2019
-#------------------------------------------------------------
+# choose the investigaed (HU) and comparator (Denmark) country
+investigated <- "HU"   # investigated country
+comparator   <- "DK"   # comparator country (later can be changed)
+
+# by death causes: number of standardized death cases
+# for investigated and comparator country, both for 2011 and 2019
 rates <- health_final %>%
-  filter(geo %in% c(investigated, comparator),
-         time %in% c(base_year, ref_year)) %>%
+  filter(geo %in% c(investigated, comparator)) %>%
   mutate(group = ifelse(geo == investigated, "inv", "comp"),
          col   = paste0(group, "_", time)) %>%
   select(icd10, col, values) %>%
   pivot_wider(names_from = col, values_from = values) %>%
   select(icd10,
-         inv_0  = all_of(paste0("inv_",  base_year)),
-         inv_1  = all_of(paste0("inv_",  ref_year)),
-         comp_0 = all_of(paste0("comp_", base_year)),
-         comp_1 = all_of(paste0("comp_", ref_year)))
+         inv_0  = all_of(paste0("inv_",  2011)),
+         inv_1  = all_of(paste0("inv_",  2019)),
+         comp_0 = all_of(paste0("comp_", 2011)),
+         comp_1 = all_of(paste0("comp_", 2019)))
 
-
-#------------------------------------------------------------
-# 3) CONVERGENCE MEASURE AND KITAGAWA DECOMPOSITION
-#    (point estimates)
-#------------------------------------------------------------
+# Kitagawa decomposition
 # V and k for all rows (including ALL_CAUSES)
 convergence <- rates %>%
   mutate(V_0 = inv_0 / comp_0,
@@ -115,6 +100,7 @@ kitagawa_results <- rates %>%
     Kpp   = (Kpp_0 + Kpp_1) / 2
   )
 
+# composition effect and 'reszhatas' effect :')
 kitagawa_summary <- kitagawa_results %>%
   summarise(sum_Kp = sum(Kp),
             composition_effect = sum(Kpp))
@@ -123,23 +109,30 @@ kitagawa_summary <- kitagawa_results %>%
 total_k <- convergence %>% filter(icd10 == "ALL_CAUSES") %>% pull(k)
 kitagawa_summary$sum_Kp + kitagawa_summary$composition_effect
 total_k
+# difference: we do not use all the death cases (only 13) 
 
-#------------------------------------------------------------
-# 4) PARAMETRIC BOOTSTRAP (logic of compstat_09.R)
+
+# 4) PARAMETRIC BOOTSTRAP
 #
 # Assumption: the number of deaths follows a Poisson distribution
 # whose parameter is the observed rate:
 #   Investigated_0 ~ Poi(inv_0),  Investigated_1 ~ Poi(inv_1)
 #   Comparator_0   ~ Poi(comp_0), Comparator_1   ~ Poi(comp_1)
+
 # We simulate B new "samples" for each cause and each of the 4 rates,
 # then take the 2.5% and 97.5% quantiles (percentile CI).
 #------------------------------------------------------------
+
+N     <- 10000         # number of bootstrap replications
+alpha <- 0.05          # 95% confidence level
+set.seed(12)         # reproducibility
+
 rate_cols <- c("inv_0", "inv_1", "comp_0", "comp_1")
 
 # list: one B x 4 matrix of simulated rates for each cause
 bs_sim <- lapply(seq_len(nrow(rates)), function(i) {
   sapply(rate_cols, function(col) {
-    rpois(n = B, lambda = rates[[col]][i])
+    rpois(n = N, lambda = rates[[col]][i])
   })
 })
 names(bs_sim) <- rates$icd10
@@ -157,14 +150,18 @@ ci_rates <- do.call(rbind, lapply(rates$icd10, function(cause) {
   )
 }))
 
+# we should use this for the visualization
+ci_rates
+
+## these are just AI stuff...
+##################################################################
 # wide format: one row per cause, lower/upper for all 4 series
 ci_wide <- ci_rates %>%
   pivot_wider(names_from = series,
               values_from = c(observed, lower, upper),
               names_glue = "{series}_{.value}")
 
-#------------------------------------------------------------
-# 5) SIGNIFICANT DIFFERENCES (investigated vs comparator)
+# SIGNIFICANT DIFFERENCES (investigated vs comparator)
 #    A difference is significant if the two 95% CIs do not overlap
 #    in the given year.
 #------------------------------------------------------------
@@ -184,7 +181,7 @@ significance <- ci_wide %>%
 print(significance)
 
 #------------------------------------------------------------
-# 5b) Multiple comparisons (compstat_09.R, Bonferroni idea):
+# 5b) Multiple comparisons --> Bonferroni idea:
 #     14 causes are tested in each year, so the family-wise error
 #     rate grows. Bonferroni-adjusted level: alpha / g.
 #------------------------------------------------------------
