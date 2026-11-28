@@ -1,8 +1,12 @@
 ### Health convergence
-# install.packages("eurostat")
+# install.packages(c("eurostat", "dplyr", "tidyr", "ggplot2"))
 library(eurostat)
 library(dplyr)
 library(tidyr)
+library(ggplot2)
+
+base_year <- 2011
+ref_year  <- 2019
 
 # downloading the eurostat geo codes and names
 geo_dic <- get_eurostat_dic("geo")
@@ -12,13 +16,13 @@ country_codes <- geo_dic$code_name[
   grepl("^[A-Z]{2}$", geo_dic$code_name)
 ]
 
-# download the eurostat: Causes of death: 
+# download the eurostat: Causes of death:
 # standardised death rate by NUTS 2 region (country) of residence
 health_data <- get_eurostat(
   id = "hlth_cd_asdr2",
   filters = list(
     geo = country_codes, # only the 2-letters coded
-    time = c(2011, 2019), # 2011 and 2019
+    time = c(base_year, ref_year), # 2011 and 2019
     sex = "T", # total
     age = "TOTAL", # total
     unit = "RT" # age-standardised death rate
@@ -71,10 +75,10 @@ rates <- health_final %>%
   select(icd10, col, values) %>%
   pivot_wider(names_from = col, values_from = values) %>%
   select(icd10,
-         inv_0  = all_of(paste0("inv_",  2011)),
-         inv_1  = all_of(paste0("inv_",  2019)),
-         comp_0 = all_of(paste0("comp_", 2011)),
-         comp_1 = all_of(paste0("comp_", 2019)))
+         inv_0  = all_of(paste0("inv_",  base_year)),
+         inv_1  = all_of(paste0("inv_",  ref_year)),
+         comp_0 = all_of(paste0("comp_", base_year)),
+         comp_1 = all_of(paste0("comp_", ref_year)))
 
 # Kitagawa decomposition
 # V and k for all rows (including ALL_CAUSES)
@@ -267,10 +271,201 @@ print(ci_kitagawa)
 print(ci_totals)
 
 #------------------------------------------------------------
-# 7) QUICK VISUAL CHECK of one simulated distribution
+# 7) VISUALIZATIONS
 #------------------------------------------------------------
-hist(bs_sim[["I"]][, "inv_1"],
-     main = paste("Simulated rate, cause I,", investigated, ref_year),
-     xlab = "rate per 100 000")
-abline(v = quantile(bs_sim[["I"]][, "inv_1"], c(alpha / 2, 1 - alpha / 2)),
-       col = "red")
+
+# The waterfall explains the change from the all-cause ratio in 2011
+# to the all-cause ratio in 2019. Each cause contributes its Kp
+# (rate effect), followed by the total composition effect. The
+# residual closes the gap that remains because the 13 cause rows do
+# not reproduce the published all-cause rate exactly.
+cause_labels <- c(
+  "A_B" = "Infectious diseases",
+  "C00-D48" = "Neoplasms",
+  "D50-D89" = "Blood disorders",
+  "E" = "Endocrine & metabolic",
+  "F" = "Mental & behavioural",
+  "G_H" = "Nervous system & sense organs",
+  "I" = "Circulatory",
+  "J" = "Respiratory",
+  "K" = "Digestive",
+  "L" = "Skin",
+  "M" = "Musculoskeletal",
+  "N" = "Genitourinary",
+  "V01-Y89" = "External causes"
+)
+
+V_0 <- convergence %>%
+  filter(icd10 == "ALL_CAUSES") %>%
+  pull(V_0)
+V_1 <- convergence %>%
+  filter(icd10 == "ALL_CAUSES") %>%
+  pull(V_1)
+
+cause_steps <- kitagawa_results %>%
+  arrange(Kp) %>%
+  transmute(
+    label = unname(cause_labels[icd10]),
+    value = Kp,
+    effect = ifelse(value < 0, "Convergence", "Divergence")
+  )
+
+residual <- (V_1 - V_0) -
+  kitagawa_summary$sum_Kp -
+  kitagawa_summary$composition_effect
+
+waterfall_steps <- bind_rows(
+  cause_steps,
+  tibble(
+    label = "Composition effect",
+    value = kitagawa_summary$composition_effect,
+    effect = ifelse(value < 0, "Convergence", "Divergence")
+  ),
+  tibble(
+    label = "Residual",
+    value = residual,
+    effect = "Residual"
+  )
+)
+
+waterfall_steps$end <- V_0 + cumsum(waterfall_steps$value)
+waterfall_steps$start <- c(V_0, head(waterfall_steps$end, -1))
+
+waterfall_data <- bind_rows(
+  tibble(
+    label = paste0("Ratio ", base_year),
+    start = 0,
+    end = V_0,
+    value = V_0,
+    effect = "Total"
+  ),
+  waterfall_steps,
+  tibble(
+    label = paste0("Ratio ", ref_year),
+    start = 0,
+    end = V_1,
+    value = V_1,
+    effect = "Total"
+  )
+) %>%
+  mutate(
+    id = row_number(),
+    label = factor(label, levels = label)
+  )
+
+waterfall_plot <- ggplot(waterfall_data) +
+  geom_rect(
+    aes(
+      xmin = id - 0.4,
+      xmax = id + 0.4,
+      ymin = pmin(start, end),
+      ymax = pmax(start, end),
+      fill = effect
+    )
+  ) +
+  geom_text(
+    aes(
+      x = id,
+      y = pmax(start, end),
+      label = ifelse(
+        effect == "Total",
+        sprintf("%.3f", value),
+        sprintf("%+.3f", value)
+      )
+    ),
+    vjust = -0.4,
+    size = 3
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Total" = "#6B7280",
+      "Convergence" = "#2E8B57",
+      "Divergence" = "#C74343",
+      "Residual" = "#C4A24C"
+    )
+  ) +
+  scale_x_continuous(
+    breaks = waterfall_data$id,
+    labels = levels(waterfall_data$label)
+  ) +
+  labs(
+    title = paste(
+      "Change in the mortality ratio:",
+      investigated, "relative to", comparator
+    ),
+    subtitle = paste(
+      "Cause-specific rate effects, followed by composition and residual"
+    ),
+    x = NULL,
+    y = "Mortality ratio (investigated / comparator)",
+    fill = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "top"
+  )
+
+print(waterfall_plot)
+
+# A waterfall does not display uncertainty reliably when each step is
+# bootstrap-correlated. Plot the cause effects with their CIs separately.
+cause_order <- kitagawa_results %>%
+  arrange(Kp) %>%
+  pull(icd10)
+
+effect_ci_data <- bind_rows(
+  ci_kitagawa %>%
+    transmute(
+      icd10,
+      Effect = "Rate effect (Kp)",
+      estimate = Kp_obs,
+      lower = Kp_low,
+      upper = Kp_up
+    ),
+  ci_kitagawa %>%
+    transmute(
+      icd10,
+      Effect = "Composition effect (Kpp)",
+      estimate = Kpp_obs,
+      lower = Kpp_low,
+      upper = Kpp_up
+    )
+) %>%
+  mutate(
+    Cause = factor(
+      unname(cause_labels[icd10]),
+      levels = unname(cause_labels[cause_order])
+    )
+  )
+
+effect_ci_plot <- ggplot(
+  effect_ci_data,
+  aes(
+    x = estimate,
+    y = Cause,
+    colour = Effect
+  )
+) +
+  geom_vline(xintercept = 0, colour = "grey55", linetype = "dashed") +
+  geom_pointrange(
+    aes(xmin = lower, xmax = upper),
+    position = position_dodge(width = 0.55)
+  ) +
+  scale_colour_manual(
+    values = c(
+      "Rate effect (Kp)" = "#2C7FB8",
+      "Composition effect (Kpp)" = "#C46A31"
+    )
+  ) +
+  facet_wrap(~Effect, ncol = 2, scales = "free_x") +
+  labs(
+    title = "Cause-specific decomposition effects with bootstrap intervals",
+    x = "Contribution to change in the mortality ratio",
+    y = NULL,
+    colour = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none")
+
+print(effect_ci_plot)
