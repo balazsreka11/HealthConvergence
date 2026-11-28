@@ -129,20 +129,15 @@ population exposure, or standardization weights.
 
 The waterfall chart shows:
 
-```text
-2011 all-cause ratio
--> 13 cause-specific rate contributions (Kp)
--> total composition effect
--> residual
--> 2019 all-cause ratio
-```
+- 2011 and 2019 all-cause ratio
+    - **grey bars**: observed ratio at the beginning and at the end
+- 13 cause-specific rate contributions (Kp) and total comosition effect
+    - **green bars**: contributions toward convergence.
+    - **red bars**: contributions toward divergence.
+- residual: **gold bar**
 
-- Grey bars: observed ratios at the beginning and end.
-- Green bars: contributions toward convergence.
-- Red bars: contributions toward divergence.
-- Gold bar: residual.
 
-This plot identifies which causes contributed most to the overall change.
+This plot identifies which causes contributed most to the overall change. It starts with Hungary’s all-causes death-rate ratio to Denmark in 2011 and shows contributions that lead to the 2019 ratio. The cause-specific `Kp` bars represent changes in Hungary’s rate relative to Denmark’s for each cause; the composition bar represents changes in the distribution of comparator (Denmark) rates across causes. The residual is the remaining difference needed to reach the observed all-causes ratio, because the 13 selected causes do not exactly reproduce the all-causes figures.
 
 ### Effect and Confidence Interval Plot
 
@@ -157,7 +152,7 @@ The dashed vertical line represents zero:
 
 Confidence intervals are shown separately from the waterfall because simulated
 cause contributions are correlated and do not behave as independent waterfall
-steps.
+steps. Each point is the estimated contribution for one cause: `Kp` (rate effect) in one panel and `Kpp` (composition effect) in the other. The horizontal lines are the code’s estimated uncertainty intervals. Intervals crossing zero indicate that the estimate could plausibly be either positive or negative under the model used.
 
 ## Main Outputs
 
